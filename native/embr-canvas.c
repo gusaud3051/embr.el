@@ -3,7 +3,7 @@
  * Decodes JPEG data via libjpeg-turbo and writes pixels directly
  * into an Emacs canvas buffer, bypassing the Elisp image pipeline.
  *
- * Requires: Emacs 31+ with canvas patch, libjpeg-turbo.
+ * Requires: Emacs 32+ or canvas-patched Emacs 31, libjpeg-turbo.
  *
  * Build:  make -C native
  * Load:   (module-load "native/embr-canvas.so")
@@ -20,8 +20,30 @@
 
 int plugin_is_GPL_compatible;
 
-/* True if the running Emacs has canvas_pixel/canvas_refresh. */
+/* True if the running Emacs has the canvas API used at compile time. */
 static int canvas_api_available = 0;
+
+/* Emacs 32 renamed pixel access and moved refresh to a Lisp primitive.
+   Keep the original Emacs 31 patch working with its own module headers. */
+static uint32_t *
+embr_canvas_data (emacs_env *env, emacs_value canvas)
+{
+#if EMACS_MAJOR_VERSION >= 32
+  return env->canvas_data (env, canvas);
+#else
+  return env->canvas_pixel (env, canvas);
+#endif
+}
+
+static void
+embr_canvas_refresh (emacs_env *env, emacs_value canvas)
+{
+#if EMACS_MAJOR_VERSION >= 32
+  env->funcall (env, env->intern (env, "canvas-refresh"), 1, &canvas);
+#else
+  env->canvas_refresh (env, canvas);
+#endif
+}
 
 #define EMBR_MAX_DIMENSION 32768
 #define EMBR_MAX_JPEG_BYTES (64u * 1024u * 1024u)
@@ -81,7 +103,7 @@ Fembr_canvas_blit_jpeg (emacs_env *env, ptrdiff_t nargs,
     return env->intern (env, "nil");
 
   /* 1. Get canvas pixel buffer. */
-  uint32_t *pixel = env->canvas_pixel (env, args[0]);
+  uint32_t *pixel = embr_canvas_data (env, args[0]);
   if (!pixel)
     return env->intern (env, "nil");
 
@@ -218,7 +240,7 @@ Fembr_canvas_blit_jpeg (emacs_env *env, ptrdiff_t nargs,
     return env->intern (env, "nil");
 
   /* 5. Tell Emacs the canvas changed. */
-  env->canvas_refresh (env, args[0]);
+  embr_canvas_refresh (env, args[0]);
   result = env->intern (env, "t");
   return result;
 }
@@ -234,7 +256,7 @@ Fembr_canvas_clear (emacs_env *env, ptrdiff_t nargs,
   if (!canvas_api_available)
     return env->intern (env, "nil");
 
-  uint32_t *pixel = env->canvas_pixel (env, args[0]);
+  uint32_t *pixel = embr_canvas_data (env, args[0]);
   if (!pixel)
     return env->intern (env, "nil");
 
@@ -251,7 +273,7 @@ Fembr_canvas_clear (emacs_env *env, ptrdiff_t nargs,
     return env->intern (env, "nil");
 
   memset (pixel, 0, bytes);
-  env->canvas_refresh (env, args[0]);
+  embr_canvas_refresh (env, args[0]);
   return env->intern (env, "t");
 }
 
@@ -274,8 +296,18 @@ emacs_module_init (struct emacs_runtime *ert)
     return 1;
   emacs_env *env = ert->get_environment (ert);
 
-  /* Detect canvas API by checking env struct size. */
+  /* Check the ABI before reading any of its canvas function pointers. */
   canvas_api_available = (env->size >= (ptrdiff_t) sizeof (*env));
+#if EMACS_MAJOR_VERSION >= 32
+  canvas_api_available = canvas_api_available && env->canvas_data != NULL;
+#else
+  /* The old, out-of-tree ABI must not be used with upstream Emacs 32. */
+  emacs_value version = env->funcall (env, env->intern (env, "symbol-value"),
+    1, (emacs_value[]){env->intern (env, "emacs-major-version")});
+  canvas_api_available = canvas_api_available
+    && env->extract_integer (env, version) == EMACS_MAJOR_VERSION
+    && env->canvas_pixel != NULL && env->canvas_refresh != NULL;
+#endif
 
   emacs_value defalias = env->intern (env, "defalias");
   emacs_value func;

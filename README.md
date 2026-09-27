@@ -1,7 +1,7 @@
 ## embr.el
 **Em**acs **Br**owser
 
-Emacs is the display server. Headless Chromium is the renderer, using either [CloakBrowser](https://cloakbrowser.dev) (default, anti-fingerprinting, closed-source patches) or vanilla Playwright Chromium (fully open source). Frame transport uses CDP screencast. Emacs simulation keys pass through to the browser (similar to EXWM), and an optional `embr-vimium-mode` provides modal navigation for evil-mode users. Emacs canvas (optional) significantly improves rendering performance. If you build Emacs with the [canvas patch](https://github.com/minad/emacs-canvas-patch) (see [./canvasmacs](./canvasmacs)) and set `embr-render-backend` to `'canvas`, embr renders frames directly to a pixel buffer via a native C module. We are excited about and advocating for this patch to be [mainlined into Emacs](https://debbugs.gnu.org/cgi/bugreport.cgi?bug=80281#389) -- embr serves as a proof of concept that canvas enables real-time buffer rendering in Emacs.
+Emacs is the display server. Headless Chromium is the renderer, using either [CloakBrowser](https://cloakbrowser.dev) (default, anti-fingerprinting, closed-source patches) or vanilla Playwright Chromium (fully open source). Frame transport uses CDP screencast. Emacs simulation keys pass through to the browser (similar to EXWM), and an optional `embr-vimium-mode` provides modal navigation for evil-mode users. With Emacs 32's built-in Canvas support, or Emacs 31 with the original [canvas patch](https://github.com/minad/emacs-canvas-patch) (see [./canvasmacs](./canvasmacs)), set `embr-render-backend` to `'canvas` to render frames directly to a pixel buffer via a native C module.
 
 ![embr screenshot](assets/screenshot-v2.png)
 
@@ -106,6 +106,30 @@ Everything else is optional. The blocklist is engine-independent. Extensions (uB
 
 All management is done from Emacs, no terminal needed. CloakBrowser setup builds in a temp venv and swaps atomically. Chromium setup creates the venv the same way if none exists, then downloads the browser binary separately.
 
+### Canvas rendering
+
+Canvas needs a graphical Emacs with `(image-type-available-p 'canvas)`
+returning non-nil, a C compiler, `make`, Emacs module headers, and libjpeg
+development files. Emacs 32 uses the built-in Canvas API; the original
+Emacs 31 patch remains supported when compiled against its patched headers.
+
+On macOS, install the compiler with `xcode-select --install` if needed, and
+install the JPEG dependency with `brew install jpeg-turbo pkg-config`.
+The build locates headers in the selected Emacs app bundle and uses
+`pkg-config` to locate libjpeg. Then set `embr-render-backend` to `'canvas`;
+embr builds the module on first use. Failed builds retain their output in
+`*embr-canvas-build*`.
+
+To build manually, run `make module EMACS=/path/to/emacs`. For custom
+installations, `make -C native EMACS_INCLUDE=/path/to/include` overrides
+header discovery. After changing Emacs builds or upgrading from the old
+Canvas patch, run `make -C native clean` and rebuild against the matching
+headers, then restart Emacs before loading the replacement module.
+
+`make test` runs syntax checks and regression tests without a display.
+`make test-canvas` starts a separate GUI Emacs, tests Canvas detection,
+JPEG decoding, clearing, resizing and fragmented frame delivery, then exits.
+
 ### Where state is stored
 
 | What | Path |
@@ -141,7 +165,7 @@ All management is done from Emacs, no terminal needed. CloakBrowser setup builds
 | `embr-download-directory` | directory | `~/Downloads/` | Directory where downloaded files are saved. |
 | `embr-jpeg-quality` | integer | `80` | JPEG quality (1-100) for frame captures. Used by both screencast and screenshot. Lower values encode faster but degrade image quality. |
 | `embr-frame-source` | symbol | `'screencast` | `'screencast` uses CDP screencast (recommended). `'screenshot` uses polling only. |
-| `embr-render-backend` | symbol | `'default` | `'default` uses JPEG file + create-image. `'canvas` requires canvas-patched Emacs. |
+| `embr-render-backend` | symbol | `'default` | `'default` uses JPEG file + create-image. `'canvas` requires Emacs 32 or canvas-patched Emacs 31 and the native module. |
 | `embr-display-method` | symbol | `'headless` | `'headless`, `'headed` (requires Xvfb), `'headed-offscreen` (requires Xvfb). |
 | `embr-dispatch-key` | string | `"C-c"` | Key that opens the transient dispatch menu. Must be set before embr is loaded. |
 | `embr-vimium-leader` | string | `"SPC"` | Key that opens the dispatch menu in vimium normal mode. |
@@ -364,7 +388,8 @@ Headless Chromium does not render scroll bars. Setting `embr-display-method` to 
 
 ### Does this work on macOS?
 
-Unknown. Let us know.
+The Canvas backend supports macOS GUI builds of Emacs 32. See
+[Canvas rendering](#canvas-rendering) for native module dependencies and builds.
 
 ### Windows?
 

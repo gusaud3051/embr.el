@@ -260,9 +260,9 @@ at the cost of hover precision."
 (defcustom embr-render-backend 'default
   "Render backend for frame display.
 `default' uses the JPEG file + create-image path (works on any Emacs).
-`canvas' uses the native canvas pixel path (requires canvas-patched Emacs)."
+`canvas' uses native pixels (requires Emacs 32 or canvas-patched Emacs 31)."
   :type '(choice (const :tag "Default (JPEG file)" default)
-                 (const :tag "Canvas (requires patch)" canvas)))
+                 (const :tag "Canvas (Emacs 32 or patched Emacs 31)" canvas)))
 
 (defcustom embr-display-method 'headless
   "How the browser display is managed.
@@ -835,18 +835,41 @@ from the build dir to the source repo."
                         (expand-file-name "embr.el" embr--directory))))
 
 (defun embr--canvas-maybe-compile ()
-  "Compile the canvas native module if source exists but .so does not."
+  "Compile the canvas module when missing or older than its sources."
   (let* ((source-dir (embr--canvas-source-dir))
          (so (expand-file-name "native/embr-canvas.so" source-dir))
-         (src (expand-file-name "native/embr-canvas.c" source-dir)))
-    (when (and (file-exists-p src) (not (file-exists-p so)))
+         (src (expand-file-name "native/embr-canvas.c" source-dir))
+         (makefile (expand-file-name "native/Makefile" source-dir)))
+    (when (and (file-exists-p src)
+               (or (not (file-exists-p so))
+                   (file-newer-than-file-p src so)
+                   (file-newer-than-file-p makefile so)))
       (message "embr: compiling canvas module...")
-      (let ((ret (call-process
-                  "make" nil nil nil "-C"
-                  (expand-file-name "native" source-dir))))
-        (if (= ret 0)
-            (message "embr: canvas module compiled")
-          (message "embr: canvas module compilation failed (exit %d)" ret))))))
+      (let ((buffer (get-buffer-create "*embr-canvas-build*")))
+        (with-current-buffer buffer (erase-buffer))
+        (let ((ret (call-process
+                    "make" nil (list buffer t) nil "-C"
+                    (expand-file-name "native" source-dir)
+                    (concat "EMACS=" (expand-file-name
+                                     invocation-name invocation-directory)))))
+          (if (eq ret 0)
+              (message "embr: canvas module compiled")
+            (error "Canvas module compilation failed (%s); see %s"
+                   ret (buffer-name buffer))))))))
+
+(defun embr--canvas-create (width height)
+  "Return a canvas image with pixel dimensions WIDTH and HEIGHT."
+  (let ((id (embr--canvas-next-id)))
+    (if (fboundp 'canvas-refresh)
+        `(image :type canvas :id ,id :data-width ,width :data-height ,height)
+      `(image :type canvas :canvas-id ,id
+              :canvas-width ,width :canvas-height ,height))))
+
+(defun embr--canvas-dimensions (image)
+  "Return the pixel dimensions of canvas IMAGE as (WIDTH . HEIGHT)."
+  (let ((props (cdr image)))
+    (cons (or (plist-get props :data-width) (plist-get props :canvas-width))
+          (or (plist-get props :data-height) (plist-get props :canvas-height)))))
 
 (defun embr--canvas-available-p ()
   "Return non-nil if canvas rendering is available.
@@ -867,18 +890,10 @@ Layer 1: image type.  Layer 2: native module.  Layer 3: smoke render."
       (message "embr: canvas module unavailable: %s"
                (error-message-string err))
       nil))
-   ;; Layer 3: smoke render (create tiny canvas, call module, verify
-   ;; no crash).  Blit returns nil for invalid JPEG but exercises
-   ;; canvas_pixel internally, proving the API works end-to-end.
+   ;; Layer 3: require an actual pixel write and refresh to succeed.
    (condition-case err
-       (progn
-         (embr-canvas-blit-jpeg
-          '(image :type canvas
-                  :canvas-id embr--smoke-test
-                  :canvas-width 4
-                  :canvas-height 4)
-          "" 4 4 0)
-         t)
+       (or (embr-canvas-clear (embr--canvas-create 4 4) 4 4)
+           (error "Canvas pixel write or refresh failed"))
      (error
       (message "embr: canvas smoke test failed: %s"
                (error-message-string err))
@@ -1025,14 +1040,14 @@ via a process property so buffer-local vars resolve correctly."
                     (setq embr--canvas-last-seq seq)
                     (when embr--canvas-image
                       (condition-case err
-                          (progn
+                          (let ((size (embr--canvas-dimensions
+                                       embr--canvas-image)))
                             ;; Pass canvas buffer dimensions (from the
                             ;; image spec), not frame dimensions -- a
                             ;; mismatch causes an out-of-bounds write.
                             (embr-canvas-blit-jpeg
                              embr--canvas-image jpeg-data
-                             (plist-get (cdr embr--canvas-image) :canvas-width)
-                             (plist-get (cdr embr--canvas-image) :canvas-height)
+                             (car size) (cdr size)
                              seq)
                             (cl-incf embr--canvas-frame-count)
                             (setq embr--canvas-error-count 0))
@@ -1051,12 +1066,8 @@ via a process property so buffer-local vars resolve correctly."
 (defun embr--backend-init-canvas (socket-path)
   "Initialize the canvas render backend.
 Connect to SOCKET-PATH and create the canvas image in the buffer."
-  (let ((canvas-id (embr--canvas-next-id)))
-    (setq embr--canvas-image
-          `(image :type canvas
-                  :canvas-id ,canvas-id
-                  :canvas-width ,embr--viewport-width
-                  :canvas-height ,embr--viewport-height)))
+  (setq embr--canvas-image
+        (embr--canvas-create embr--viewport-width embr--viewport-height))
   (setq embr--canvas-recv-buf ""
         embr--canvas-error-count 0
         embr--canvas-last-seq 0
@@ -1096,15 +1107,11 @@ Connect to SOCKET-PATH and create the canvas image in the buffer."
      (lambda ()
        (setq embr--canvas-recv-buf ""
              embr--canvas-last-seq 0)
-       (if (fboundp 'embr-canvas-clear)
-           (embr-canvas-clear
-            embr--canvas-image
-            (plist-get (cdr embr--canvas-image) :canvas-width)
-            (plist-get (cdr embr--canvas-image) :canvas-height))
-         ;; Compatibility path for older module builds.
-         (embr--canvas-resize
-          (plist-get (cdr embr--canvas-image) :canvas-width)
-          (plist-get (cdr embr--canvas-image) :canvas-height)))))))
+       (let ((size (embr--canvas-dimensions embr--canvas-image)))
+         (if (fboundp 'embr-canvas-clear)
+             (embr-canvas-clear embr--canvas-image (car size) (cdr size))
+           ;; Compatibility path for older module builds.
+           (embr--canvas-resize (car size) (cdr size))))))))
 
 (defun embr--canvas-resize (width height)
   "Recreate the canvas image at WIDTH x HEIGHT.
@@ -1112,12 +1119,7 @@ Allocate a fresh canvas-id so the C module creates a new pixel
 buffer at the correct size."
   (embr--canvas-with-mutation
    (lambda ()
-     (let ((canvas-id (embr--canvas-next-id)))
-       (setq embr--canvas-image
-             `(image :type canvas
-                     :canvas-id ,canvas-id
-                     :canvas-width ,width
-                     :canvas-height ,height)))
+     (setq embr--canvas-image (embr--canvas-create width height))
      (setq embr--canvas-recv-buf ""
            embr--canvas-last-seq 0)
      (let ((inhibit-read-only t))

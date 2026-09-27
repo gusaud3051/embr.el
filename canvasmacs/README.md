@@ -2,6 +2,10 @@
 
 Emacs 31 (PGTK/Wayland) with the [canvas image patch](https://github.com/minad/emacs-canvas-patch) baked in.
 
+Emacs 32 has built-in Canvas support and does not need this legacy patch.
+See [Canvas rendering](../README.md#canvas-rendering) for building embr's
+native module against Emacs 32, including macOS app bundles.
+
 ## Using canvas with embr
 
 Set `embr-render-backend` to `'canvas` to enable the native canvas render path. embr decodes JPEG frames directly into the canvas pixel buffer via a native C module, skipping the per-frame disk round-trip. Works without canvas too -- `'default` is the safe fallback for any Emacs build.

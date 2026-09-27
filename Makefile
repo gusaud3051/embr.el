@@ -2,7 +2,7 @@ EMACS ?= emacs
 PYTHON ?= python3
 SHELLCHECK ?= shellcheck
 
-test: checkparens bytecompile checkpy shellcheck
+test: checkparens bytecompile checkpy shellcheck ert
 
 check: test
 
@@ -21,8 +21,15 @@ checkpy:
 shellcheck:
 	$(SHELLCHECK) setup.sh && echo "OK: shell scripts pass shellcheck"
 
-# Native canvas module — requires canvas-patched Emacs + libjpeg-turbo.
-module:
-	$(MAKE) -C native
+ert:
+	$(EMACS) -Q --batch -L . -l tests/embr-canvas-tests.el --eval '(ert-run-tests-batch-and-exit (quote (not (tag native))))'
 
-.PHONY: test check checkparens bytecompile checkpy shellcheck module
+# Native canvas module — requires Emacs 32 or patched Emacs 31 + libjpeg-turbo.
+module:
+	$(MAKE) -C native EMACS="$(EMACS)"
+
+# Run in a separate GUI Emacs: canvas buffers require a graphical frame.
+test-canvas: module
+	$(EMACS) -Q -l "$(CURDIR)/tests/run-canvas-tests.el"
+
+.PHONY: test check checkparens bytecompile checkpy shellcheck ert module test-canvas
